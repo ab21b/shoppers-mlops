@@ -1,12 +1,3 @@
-"""Команда №3 из README: весь путь до модели в kind-кластере одной командой.
-
-    uv run python scripts/kind_up.py            # сборка -> kind -> apply -> rollout -> ответ модели через port-forward
-    uv run python scripts/kind_up.py --keep     # то же, но port-forward остаётся открытым (для curl и k9s)
-    uv run python scripts/kind_up.py --delete   # снести кластер
-
-Нужны: docker, kind, kubectl. Python-скрипт, а не bash, чтобы одинаково работало на Windows и macOS/Linux.
-"""
-
 from __future__ import annotations
 
 import argparse

@@ -1,5 +1,3 @@
-"""Логирование запросов в Postgres. Нет DATABASE_URL -> всё no-op, сервис работает как обычно."""
-
 from __future__ import annotations
 
 import logging
@@ -20,7 +18,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     score         double precision,          -- NULL, если предсказания не было (422/500)
     purchase      boolean,                   -- итоговый класс по порогу
     latency_ms    real,
-    status_code   integer     NOT NULL       -- НОВОЕ относительно семинара: код ответа
+    status_code   integer     NOT NULL       
 )
 """
 
@@ -36,7 +34,7 @@ def _ensure_table(conn: psycopg.Connection) -> None:
     if _table_ready:
         return
     with conn.transaction():
-        conn.execute("SELECT pg_advisory_xact_lock(7001)")  # две реплики не должны гоняться за CREATE TABLE
+        conn.execute("SELECT pg_advisory_xact_lock(7001)") 
         conn.execute(DDL)
     _table_ready = True
 

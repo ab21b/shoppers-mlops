@@ -1,5 +1,3 @@
-"""Сюжет 1. Контракт: мусор и лишние поля -> 422, а не 500 и не «молчаливый» ответ."""
-
 import pytest
 
 from shoppers.schemas import Features
@@ -22,16 +20,16 @@ def test_missing_field_is_422(client, good_row):
 @pytest.mark.parametrize(
     "field, bad",
     [
-        ("PageValues", -5),                # отрицательное
-        ("BounceRates", 1.5),              # доля > 1
-        ("ExitRates", "abc"),              # не число
-        ("Month", "Jan"),                  # такого месяца нет в обучающих данных
-        ("VisitorType", "Robot"),          # неизвестная категория
-        ("Browser", 0),                    # коды начинаются с 1
-        ("Weekend", "maybe"),              # не bool
-        ("Administrative", 2.5),           # дробное там, где счётчик
+        ("PageValues", -5),                
+        ("BounceRates", 1.5),            
+        ("ExitRates", "abc"),             
+        ("Month", "Jan"),                  # такой месяц не представлен в датасете
+        ("VisitorType", "Robot"),         
+        ("Browser", 0),                   
+        ("Weekend", "maybe"),              
+        ("Administrative", 2.5),          
     ],
-)  # fmt: skip
+)  
 def test_garbage_value_is_422(client, good_row, field, bad):
     assert post(client, {**good_row, field: bad}).status_code == 422
 
@@ -42,6 +40,5 @@ def test_non_json_body_is_422(client):
 
 
 def test_schema_matches_model_passport(client):
-    """Схема запроса и список фичей в паспорте модели не должны разъехаться."""
     meta_features = client.app.state.meta["features"]
     assert list(Features.model_fields) == meta_features

@@ -1,5 +1,3 @@
-"""Сюжет 3. Детерминизм: один вход дважды -> один и тот же ответ."""
-
 import joblib
 import pandas as pd
 
@@ -13,7 +11,6 @@ def test_same_input_same_score(client, good_row):
 
 
 def test_same_score_after_reloading_bundle(client, good_row):
-    """Артефакт на диске даёт тот же скор, что и модель в памяти сервиса."""
     bundle = joblib.load(settings.model_path)
     frame = pd.DataFrame([good_row])[bundle["metadata"]["features"]]
     frame["Weekend"] = frame["Weekend"].astype(int)
@@ -23,7 +20,6 @@ def test_same_score_after_reloading_bundle(client, good_row):
 
 
 def test_pipeline_survives_unseen_category_and_nan(client):
-    """Препроцессинг внутри Pipeline: незнакомая категория и пропуск не роняют инференс."""
     pipe = client.app.state.pipeline
     feats = client.app.state.meta["features"]
     row = {f: 0 for f in feats}

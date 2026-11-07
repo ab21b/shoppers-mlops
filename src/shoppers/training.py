@@ -1,9 +1,4 @@
-"""Обучение Random Forest на online_shoppers_intention и сохранение joblib-бандла.
-
-Бандл = {"pipeline": sklearn Pipeline (препроцессинг + модель одним объектом),
-         "metadata": {версия, список фичей В ПРАВИЛЬНОМ ПОРЯДКЕ, порог, ...}}
-
-Запуск:  uv run python -m shoppers.training
+"""Обучение Random Forest на online_shoppers_intention и сохранение joblib
 """
 
 from __future__ import annotations
@@ -30,18 +25,16 @@ MODEL_VERSION = "1.0.0"
 SEED = 42
 TARGET = "Revenue"
 
-# Порядок = порядок колонок исходного датасета (без Revenue). Сервис делает reindex(columns=FEATURES).
 FEATURES = [
     "Administrative", "Administrative_Duration", "Informational", "Informational_Duration",
     "ProductRelated", "ProductRelated_Duration", "BounceRates", "ExitRates", "PageValues",
     "SpecialDay", "Month", "OperatingSystems", "Browser", "Region", "TrafficType",
     "VisitorType", "Weekend",
-]  # fmt: skip
-# как в ноутбуке: log1p для тяжёлых хвостов, one-hot для категорий
+]  =
 LOG_COLS = [
     "Administrative", "Administrative_Duration", "Informational", "Informational_Duration",
     "ProductRelated", "ProductRelated_Duration", "PageValues",
-]  # fmt: skip
+]  
 CAT_COLS = ["Month", "VisitorType", "OperatingSystems", "Browser", "Region", "TrafficType"]
 PASS_COLS = ["BounceRates", "ExitRates", "SpecialDay", "Weekend"]
 
@@ -84,7 +77,6 @@ def train(data_path: Path = DEFAULT_DATA, out_path: Path = DEFAULT_OUT, n_iter: 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=SEED)
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
 
-    # то же пространство поиска, что в ноутбуке (раздел 5), критерий ROC-AUC
     param_dist = {
         "model__n_estimators": randint(100, 250),
         "model__max_depth": randint(3, 20),
@@ -96,7 +88,6 @@ def train(data_path: Path = DEFAULT_DATA, out_path: Path = DEFAULT_OUT, n_iter: 
     search.fit(X_train, y_train)
     pipe = search.best_estimator_
 
-    # порог подбираем по OOF-предсказаниям train, тест трогаем один раз
     oof = cross_val_predict(pipe, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
     threshold = pick_threshold(y_train, oof)
 
@@ -110,7 +101,7 @@ def train(data_path: Path = DEFAULT_DATA, out_path: Path = DEFAULT_OUT, n_iter: 
         "test_f1": round(float(f1_score(y_test, pred)), 4),
         "test_recall": round(float(recall_score(y_test, pred)), 4),
     }
-    pipe.set_params(model__n_jobs=1)  # онлайн-инференс одной строки: потоки только мешают
+    pipe.set_params(model__n_jobs=1) 
 
     metadata = {
         "model_version": MODEL_VERSION,

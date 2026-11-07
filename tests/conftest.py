@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="session")
 def client():
-    with TestClient(app) as c:  # with -> отрабатывает lifespan, модель загружена
+    with TestClient(app) as c: 
         yield c
 
 

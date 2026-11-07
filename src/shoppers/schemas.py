@@ -7,20 +7,19 @@ VISITORS = Literal["New_Visitor", "Returning_Visitor", "Other"]
 
 
 class Features(BaseModel):
-    """Одна сессия пользователя интернет-магазина. Границы взяты из датасета и из смысла признаков."""
 
     model_config = ConfigDict(extra="forbid")
 
-    Administrative: int = Field(ge=0, le=100, description="Число просмотренных страниц аккаунта/администрирования")
+    Administrative: int = Field(ge=0, le=100, description="Число просмотренных страниц аккаунта")
     Administrative_Duration: float = Field(ge=0, le=100_000, description="Секунд на этих страницах")
     Informational: int = Field(ge=0, le=100, description="Число информационных страниц")
     Informational_Duration: float = Field(ge=0, le=100_000)
     ProductRelated: int = Field(ge=0, le=5000, description="Число страниц товаров")
     ProductRelated_Duration: float = Field(ge=0, le=500_000)
-    BounceRates: float = Field(ge=0, le=1, description="Доля отказов (Google Analytics)")
-    ExitRates: float = Field(ge=0, le=1, description="Доля выходов (Google Analytics)")
+    BounceRates: float = Field(ge=0, le=1, description="Доля отказов")
+    ExitRates: float = Field(ge=0, le=1, description="Доля выходов")
     PageValues: float = Field(ge=0, le=10_000, description="Средняя ценность страниц перед покупкой")
-    SpecialDay: float = Field(ge=0, le=1, description="Близость к особому дню (День Св. Валентина и т.п.)")
+    SpecialDay: float = Field(ge=0, le=1, description="Близость к празднику")
     Month: MONTHS
     OperatingSystems: int = Field(ge=1, le=8)
     Browser: int = Field(ge=1, le=13)

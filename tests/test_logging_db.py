@@ -1,5 +1,3 @@
-"""Логирование: запись вызывается с кодом ответа; без DATABASE_URL сервис работает; с БД - реальная проверка."""
-
 import os
 import time
 
@@ -51,5 +49,5 @@ def test_row_lands_in_postgres(client, good_row):
     time.sleep(0.5)
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         row = conn.execute("SELECT status_code, features->>'Month' FROM predictions WHERE request_id = %s",
-                           (r["request_id"],)).fetchone()  # fmt: skip
+                           (r["request_id"],)).fetchone() 
     assert row == (200, "Nov")

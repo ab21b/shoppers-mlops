@@ -1,5 +1,3 @@
-"""Сюжет 2. Smoke: ответ в допустимом диапазоне, типы правильные."""
-
 import uuid
 
 import pandas as pd
