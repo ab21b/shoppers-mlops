@@ -1,0 +1,48 @@
+[project]
+name = "shoppers-service"
+version = "1.0.0"
+description = "MLOps seminar 1: Random Forest, online shoppers purchase intention"
+requires-python = ">=3.11,<3.13"
+
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic>=2",
+    "pydantic-settings",
+    "pandas>=2.2,<3",
+    "numpy<3",
+    "scikit-learn>=1.6,<1.7",
+    "joblib",
+    "psycopg[binary]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",
+    "ruff",
+]
+notebook = [
+    "ipykernel",
+    "nbconvert",
+    "matplotlib",
+    "seaborn",
+]
+
+[build-system]
+requires = ["uv_build>=0.10,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "shoppers"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: нужна база данных, адрес в DATABASE_URL"]
+
+[tool.ruff]
+line-length = 130
+extend-exclude = ["notebooks", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
