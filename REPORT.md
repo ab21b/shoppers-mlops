@@ -70,3 +70,43 @@ k9s --context kind-mlpro
 |---|---|---|---|
 | 1 | `docker compose up -d --build`: контейнер api не стартовал | Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint shoppers-mlops-api-1 (...): Bind for 0.0.0.0:8000 failed: port is already allocated | Был активен старый контейнер с прошлого запуска этого проекта пришлось снести его docker stop online_shoppers_mlops-api-1 online_shoppers_mlops-db-1|
 | 2 | `SELECT ... FROM predictions`|  relation "predictions" does not exist| запросы уходили в старый api и писались в его базу. После освобождения порта и пересоздания стека таблица появилась |
+
+---
+
+# Домашняя работа 2. CI/CD
+
+## 1. Почему build зависит от tests через `needs`?
+
+`needs: tests` задаёт порядок выполнения и блокирует сборку образа, если линтер или тесты завершились ошибкой. В результате в GHCR не публикуется образ коммита, который не прошёл проверки.
+
+## 2. Почему build и deploy запускаются только для push в main?
+
+Условия `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` исключают публикацию и развёртывание из PR. Для PR остаётся быстрая проверка качества кода без побочных действий с registry и кластером.
+
+## 3. Зачем нужен PostgreSQL advisory lock?
+
+Оба API Pod могут одновременно стартовать и выполнять `CREATE TABLE IF NOT EXISTS`. Транзакционный `pg_advisory_xact_lock(7001)` сериализует подготовку схемы, чтобы параллельная инициализация не создавала гонку. После завершения транзакции блокировка автоматически освобождается.
+
+## 4. Сколько заняли build job первая и вторая сборки? Какой слой Docker переиспользовался?
+
+Первая сборка: **[вписать фактическое время из GitHub Actions]**. Вторая сборка: **[вписать фактическое время]**. По выводу BuildKit определить, что слой зависимостей `RUN uv sync --frozen --no-dev --no-install-project` был взят из кэша, если `pyproject.toml`, `uv.lock` и `.python-version` не менялись. Время и факт cache hit заполнить по реальным логам, не оценивать приблизительно.
+
+## 5. Почему старые Pod могут некоторое время показывать ImagePullBackOff при обновлении Deployment?
+
+При rolling update старый ReplicaSet продолжает обслуживать Pod, пока новый ReplicaSet пытается запустить Pod с новым образом. Если новый образ недоступен или тег/доступ неверен, новые Pod могут перейти в `ImagePullBackOff`, а старые продолжат работать. В данном CI каждый deploy job создаёт новый kind-кластер, поэтому старых Pod от предыдущего Actions run в нём нет; это объяснение относится к обновлению Deployment внутри одного и того же кластера.
+
+## 6. Как GitHub Secret попадает в переменные окружения Pod?
+
+Workflow читает `secrets.POSTGRES_PASSWORD`, создаёт Kubernetes Secret `shoppers-db` с ключами `POSTGRES_PASSWORD` и `DATABASE_URL`. PostgreSQL Deployment получает пароль через `env.valueFrom.secretKeyRef`; API Deployment получает `DATABASE_URL` тем же способом. Значение пароля не записывается в ConfigMap или Git.
+
+## 7. В каком порядке возникают состояния Pod для трёх намеренных ошибок?
+
+От самой ранней стадии запуска к более поздней: **Pending** (планировщик не может выделить ресурсы), **CreateContainerConfigError** (Pod назначен узлу, но kubelet не может подготовить контейнер из-за отсутствующего Secret), **CrashLoopBackOff** (контейнер уже запускается, приложение падает, Kubernetes повторяет запуск).
+
+## Ссылки на evidence
+
+- PR: **[вставить URL PR]**
+- Намеренно сломанный тест: красный run **[URL]**, исправление: зелёный run **[URL]**
+- Неверный MODEL_PATH: красный run **[URL]**, исправление: зелёный run **[URL]**
+- Неверный Secret reference: красный run **[URL]**, исправление: зелёный run **[URL]**
+- Невозможный memory request: красный run **[URL]**, исправление: зелёный run **[URL]**

@@ -1,0 +1,178 @@
+name: Shoppers CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: shoppers
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shoppers"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:${{ secrets.POSTGRES_PASSWORD }}@localhost:5432/shoppers
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      - name: Pytest with real PostgreSQL
+        run: uv run pytest -q
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    needs: tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Define immutable image tag
+        id: image
+        shell: bash
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: shoppers-ci
+          node_image: kindest/node:v1.30.4
+      - name: Login and load image into kind
+        shell: bash
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull "$IMAGE"
+          kind load docker-image "$IMAGE" --name shoppers-ci
+      - name: Create database Secret
+        shell: bash
+        run: |
+          test -n "$POSTGRES_PASSWORD" || { echo "POSTGRES_PASSWORD GitHub Secret is empty"; exit 1; }
+          kubectl create secret generic shoppers-db \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --from-literal=DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/shoppers" \
+            --dry-run=client -o yaml | kubectl apply -f -
+      - name: Start PostgreSQL
+        run: |
+          kubectl apply -f k8s/postgres.yaml
+          kubectl rollout status deployment/postgres --timeout=120s
+      - name: Apply ConfigMap
+        run: kubectl apply -f k8s/configmap.yaml
+      - name: Deploy API
+        shell: bash
+        run: |
+          sed "s|__IMAGE__|${IMAGE}|g" k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/service.yaml
+          kubectl rollout status deployment/shoppers-service --timeout=180s
+      - name: Smoke test API and PostgreSQL audit log
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl port-forward service/shoppers-service 8080:80 >/tmp/port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://localhost:8080/health >/tmp/health.json; then break; fi
+            sleep 2
+          done
+          python -c 'import json; h=json.load(open("/tmp/health.json")); assert h["status"] == "ok", h; assert h["prediction_threshold"] == 0.5, h; print("health/configmap:", h)'
+          curl --fail --silent -X POST http://localhost:8080/v1/predict \
+            -H 'Content-Type: application/json' --data @good.json \
+            | python -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r["purchase"], bool), r; assert 0 <= r["score"] <= 1, r; print("prediction:", r)'
+          status=$(curl --silent -o /tmp/invalid.json -w '%{http_code}' \
+            -X POST http://localhost:8080/v1/predict \
+            -H 'Content-Type: application/json' --data '{"BounceRates":-1}')
+          test "$status" = "422"
+          echo "invalid request HTTP status: $status"
+          success_rows=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc "SELECT count(*) FROM predictions WHERE status_code=200")
+          rejected_rows=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc "SELECT count(*) FROM predictions WHERE status_code=422")
+          echo "PostgreSQL rows: status_code=200 -> $success_rows; status_code=422 -> $rejected_rows"
+          test "$success_rows" -ge 1
+          test "$rejected_rows" -ge 1
+      - name: Diagnose failed deployment
+        if: failure()
+        shell: bash
+        run: |
+          echo '=== Pods ==='
+          kubectl get pods -o wide || true
+          echo '=== Deployments ==='
+          kubectl get deployments || true
+          echo '=== Recent events ==='
+          kubectl get events --sort-by=.lastTimestamp || true
+          echo '=== API pod diagnostics ==='
+          for pod in $(kubectl get pods -l app=shoppers -o name 2>/dev/null); do
+            kubectl describe "$pod" || true
+            kubectl logs "$pod" -c api --tail=100 || true
+          done
+          echo '=== PostgreSQL diagnostics ==='
+          kubectl get pods -l app=postgres -o wide || true
+          kubectl logs deployment/postgres --tail=100 || true

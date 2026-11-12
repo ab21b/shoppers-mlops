@@ -65,7 +65,33 @@ def main() -> None:
         run("kind", "create", "cluster", "--name", CLUSTER)
     run("kind", "load", "docker-image", IMAGE, "--name", CLUSTER)  # без этого будет ImagePullBackOff
 
-    kubectl("apply", "-f", "k8s/")
+    local_password = "local-shoppers-password"
+    secret = (
+        "kubectl", "create", "secret", "generic", "shoppers-db",
+        f"--from-literal=POSTGRES_PASSWORD={local_password}",
+        f"--from-literal=DATABASE_URL=postgresql://postgres:{local_password}@postgres:5432/shoppers",
+        "--dry-run=client", "-o", "yaml",
+    )
+    secret_yaml = subprocess.run(secret, cwd=ROOT, text=True, capture_output=True, check=True).stdout
+    applied = subprocess.run(
+        ("kubectl", "--context", CONTEXT, "apply", "-f", "-"),
+        cwd=ROOT, input=secret_yaml, text=True, capture_output=True, check=True,
+    )
+    print(applied.stdout, end="")
+    kubectl("apply", "-f", "k8s/postgres.yaml")
+    kubectl("rollout", "status", "deployment/postgres", "--timeout=120s")
+    kubectl("apply", "-f", "k8s/configmap.yaml")
+    deployment_yaml = (ROOT / "k8s" / "deployment.yaml").read_text().replace("__IMAGE__", IMAGE)
+    deployment_apply = subprocess.run(
+        ("kubectl", "--context", CONTEXT, "apply", "-f", "-"),
+        cwd=ROOT,
+        input=deployment_yaml,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    print(deployment_apply.stdout, end="")
+    kubectl("apply", "-f", "k8s/service.yaml")
     if existed:  # тот же тег 1.0, но образ мог измениться: заставим поды подхватить его
         kubectl("rollout", "restart", DEPLOY)
     kubectl("rollout", "status", DEPLOY, "--timeout=180s")

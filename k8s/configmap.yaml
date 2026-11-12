@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shoppers-config
+data:
+  MODEL_PATH: "artifact/model.joblib"
+  LOG_LEVEL: "INFO"
+  PREDICTION_THRESHOLD: "0.5"
