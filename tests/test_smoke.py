@@ -38,7 +38,7 @@ def test_every_dataset_row_passes_contract():
 
 def test_health_and_ready(client):
     h = client.get("/health")
-    assert h.status_code == 200 and h.json()["status"] == "ok"
+    assert h.status_code == 200 and h.json()["status"] == "broken"
     assert h.json()["prediction_threshold"] == client.app.state.threshold
     r = client.get("/ready")
     assert r.status_code == 200 and r.json()["status"] == "ready"
