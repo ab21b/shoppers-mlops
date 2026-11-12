@@ -14,21 +14,41 @@ spec:
     spec:
       containers:
         - name: api
-          image: shoppers-service:1.0
-          imagePullPolicy: IfNotPresent   # образ загружен в kind через `kind load`, из registry его не тянем
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
-          # DATABASE_URL не задан: сервис работает и не логирует (Postgres живёт в compose)
-          startupProbe:                   # даём время на загрузку модели, пока она не прошла, остальные пробы молчат
-            httpGet: {path: /health, port: 8000}
+          envFrom:
+            - configMapRef:
+                name: shoppers-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shoppers-db
+                  key: DATABASE_URL
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
             periodSeconds: 2
             failureThreshold: 30
-          livenessProbe:                  # процесс жив? иначе перезапуск
-            httpGet: {path: /health, port: 8000}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
             periodSeconds: 10
-          readinessProbe:                 # модель загружена? иначе под не получает трафик
-            httpGet: {path: /ready, port: 8000}
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
             periodSeconds: 5
+            failureThreshold: 3
           resources:
-            requests: {cpu: 100m, memory: 256Mi}
-            limits: {cpu: "1", memory: 768Mi}
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi

@@ -28,6 +28,13 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = bundle["pipeline"]
     app.state.meta = bundle["metadata"]
     app.state.version = bundle["metadata"]["model_version"]
+    app.state.threshold = (
+        settings.prediction_threshold
+        if settings.prediction_threshold is not None
+        else float(app.state.meta["threshold"])
+    )
+    if not 0.0 <= app.state.threshold <= 1.0:
+        raise ValueError("PREDICTION_THRESHOLD must be between 0 and 1")
     db.init()
     yield
     app.state.pipeline = None
@@ -40,7 +47,8 @@ app = FastAPI(title="shoppers-service", version="1.0", lifespan=lifespan,
 @app.get("/health")
 def health():
     """Liveness: процесс жив. Модель не проверяем: перезапуск пода тут не поможет."""
-    return {"status": "ok", "model_version": getattr(app.state, "version", "unknown")}
+    return {"status": "ok", "model_version": getattr(app.state, "version", "unknown"),
+            "prediction_threshold": getattr(app.state, "threshold", None)}
 
 
 @app.get("/ready")
@@ -80,7 +88,7 @@ def predict(x: Features, bg: BackgroundTasks) -> Prediction:
         db.save_prediction(request_id, payload, version, None, None, latency_ms, 500)
         raise HTTPException(status_code=500, detail=f"inference failed, request_id={request_id}") from None
 
-    purchase = score >= app.state.meta["threshold"]
+    purchase = score >= app.state.threshold
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
     # запись в БД уходит в фон: ответ не ждёт Postgres
     bg.add_task(db.save_prediction, request_id, payload, version, score, purchase, latency_ms, 200)

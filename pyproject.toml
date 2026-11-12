@@ -37,6 +37,7 @@ build-backend = "uv_build"
 module-name = "shoppers"
 
 [tool.pytest.ini_options]
+pythonpath = ["src"]
 testpaths = ["tests"]
 markers = ["integration: нужна база данных, адрес в DATABASE_URL"]
 

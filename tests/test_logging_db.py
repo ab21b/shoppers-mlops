@@ -51,3 +51,39 @@ def test_row_lands_in_postgres(client, good_row):
         row = conn.execute("SELECT status_code, features->>'Month' FROM predictions WHERE request_id = %s",
                            (r["request_id"],)).fetchone() 
     assert row == (200, "Nov")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="нужен DATABASE_URL")
+def test_validation_error_is_persisted_with_status_422(client, good_row):
+    import psycopg
+
+    response = client.post("/v1/predict", json={**good_row, "PageValues": -1})
+    assert response.status_code == 422
+    request_id = response.json()["request_id"]
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        row = conn.execute(
+            "SELECT status_code, score FROM predictions WHERE request_id = %s",
+            (request_id,),
+        ).fetchone()
+    assert row == (422, None)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="нужен DATABASE_URL")
+def test_malformed_json_is_persisted_with_status_422(client):
+    import psycopg
+
+    response = client.post(
+        "/v1/predict",
+        content="not-json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    request_id = response.json()["request_id"]
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        row = conn.execute(
+            "SELECT status_code FROM predictions WHERE request_id = %s",
+            (request_id,),
+        ).fetchone()
+    assert row == (422,)
