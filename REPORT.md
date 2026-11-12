@@ -75,38 +75,46 @@ k9s --context kind-mlpro
 
 # Домашняя работа 2. CI/CD
 
-## 1. Почему build зависит от tests через `needs`?
+## 1. Сколько секунд шёл job build в первом прогоне и сколько во втором? Какой слой Dockerfile взят из кэша и почему именно он?
 
-`needs: tests` задаёт порядок выполнения и блокирует сборку образа, если линтер или тесты завершились ошибкой. В результате в GHCR не публикуется образ коммита, который не прошёл проверки.
+В первом 1 минуту 12 секунд https://github.com/ab21b/shoppers-mlops/actions/runs/43283718969 во втором 25 секунд https://github.com/ab21b/shoppers-mlops/actions/runs/43286944650. Все слои 11-17 имет статус CACHED. #13 [stage-0 5/8] RUN uv sync --frozen --no-dev --no-install-project
+#13 CACHED Слой использовался с кэша так как файлы pyproject.toml, uv.lock и .python-version не изменились
 
-## 2. Почему build и deploy запускаются только для push в main?
+## 2. В логе deploy во время выката видны поды в ImagePullBackOff, а прогон при этом зелёный. Откуда эти поды и почему это не ошибка?
 
-Условия `if: github.event_name == 'push' && github.ref == 'refs/heads/main'` исключают публикацию и развёртывание из PR. Для PR остаётся быстрая проверка качества кода без побочных действий с registry и кластером.
+отдельный проблемный Pod не обязательно означает, что весь Deployment неработоспособен.
 
-## 3. Зачем нужен PostgreSQL advisory lock?
+## 3. Какой путь проходит пароль базы от страницы настроек GitHub до переменной окружения в поде? Почему его нельзя положить в configmap.yaml?
 
-Оба API Pod могут одновременно стартовать и выполнять `CREATE TABLE IF NOT EXISTS`. Транзакционный `pg_advisory_xact_lock(7001)` сериализует подготовку схемы, чтобы параллельная инициализация не создавала гонку. После завершения транзакции блокировка автоматически освобождается.
+Пароль базы хранится в GitHub в разделе Actions под именем POSTGRES_PASSWORD. В workflow он передаётся через ${{ secrets.POSTGRES_PASSWORD }}, после чего используется для создания Kubernetes Secret с именем shoppers-db. Затем в k8s/deployment.yaml через secretKeyRef контейнер получает нужное значение в переменную окружения. Пароль нельзя хранить в configmap.yaml, поскольку ConfigMap предназначен для несекретных настроек, а для конфиденциальных данных Kubernetes предоставляет Secret.
 
-## 4. Сколько заняли build job первая и вторая сборки? Какой слой Docker переиспользовался?
+## 4. Уберите мысленно needs: tests у job build. Опишите сценарий, в котором это закончится плохо.
 
-Первая сборка: **[вписать фактическое время из GitHub Actions]**. Вторая сборка: **[вписать фактическое время]**. По выводу BuildKit определить, что слой зависимостей `RUN uv sync --frozen --no-dev --no-install-project` был взят из кэша, если `pyproject.toml`, `uv.lock` и `.python-version` не менялись. Время и факт cache hit заполнить по реальным логам, не оценивать приблизительно.
+Если убрать needs: tests, job build сможет выполняться независимо от результата тестирования. Например, если в коде обнаружится ошибка и pytest завершится неудачно, сборка Docker-образа всё равно может пройти и опубликовать образ в GHCR. В результате может быть опубликована и потенциально развёрнута версия приложения, которая не прошла проверки. Поэтому зависимость needs: tests нужна, чтобы сборка начиналась только после успешного завершения тестов.
 
-## 5. Почему старые Pod могут некоторое время показывать ImagePullBackOff при обновлении Deployment?
+## 5. Почему на pull request у вас бегут только тесты, а build и deploy нет? Какая строка за это отвечает и зачем так сделано?
+if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+Тесты запускаются при событиях pull_request и push, поскольку для job tests нет ограничения только на основную ветку. Это сделано для того, чтобы проверять код на Pull Request, но не публиковать Docker-образы и не выполнять развёртывание до слияния изменений в основную ветку.
 
-При rolling update старый ReplicaSet продолжает обслуживать Pod, пока новый ReplicaSet пытается запустить Pod с новым образом. Если новый образ недоступен или тег/доступ неверен, новые Pod могут перейти в `ImagePullBackOff`, а старые продолжат работать. В данном CI каждый deploy job создаёт новый kind-кластер, поэтому старых Pod от предыдущего Actions run в нём нет; это объяснение относится к обновлению Deployment внутри одного и того же кластера.
+## 6. Зачем в init() стоит pg_advisory_xact_lock? Что произойдёт без него при двух репликах и пустой базе? Реплики чего именно здесь имеются в виду?
+для синхронизации инициализации базы данных. Если база пустая и две реплики приложения запустятся одновременно, обе могут попытаться создать одну и ту же таблицу. Блокировка позволяет одной транзакции выполнить инициализацию первой, а второй дождаться её завершения, предотвращая гонку при создании схемы. Под двумя репликами здесь имеются в виду два Pod API-приложения, указанные в k8s/deployment.yaml, а не две реплики PostgreSQL.
 
-## 6. Как GitHub Secret попадает в переменные окружения Pod?
+## 7. В трёх ваших красных прогонах поды застряли в трёх разных статусах. Расположите эти статусы в порядке жизни пода и объясните, на каком шаге возникает каждый.
+Pending — возникает на этапе планирования Pod, когда Kubernetes не может назначить его на узел с достаточными ресурсами. В нашем эксперименте это произошло из-за слишком большого запроса памяти.
 
-Workflow читает `secrets.POSTGRES_PASSWORD`, создаёт Kubernetes Secret `shoppers-db` с ключами `POSTGRES_PASSWORD` и `DATABASE_URL`. PostgreSQL Deployment получает пароль через `env.valueFrom.secretKeyRef`; API Deployment получает `DATABASE_URL` тем же способом. Значение пароля не записывается в ConfigMap или Git.
 
-## 7. В каком порядке возникают состояния Pod для трёх намеренных ошибок?
 
-От самой ранней стадии запуска к более поздней: **Pending** (планировщик не может выделить ресурсы), **CreateContainerConfigError** (Pod назначен узлу, но kubelet не может подготовить контейнер из-за отсутствующего Secret), **CrashLoopBackOff** (контейнер уже запускается, приложение падает, Kubernetes повторяет запуск).
+CreateContainerConfigError — возникает на этапе подготовки контейнера, когда Kubernetes не может сформировать его конфигурацию. В нашем случае причиной стало обращение к несуществующему Secret.
 
-## Ссылки на evidence
 
-- PR: **[вставить URL PR]**
-- Намеренно сломанный тест: красный run **[URL]**, исправление: зелёный run **[URL]**
-- Неверный MODEL_PATH: красный run **[URL]**, исправление: зелёный run **[URL]**
-- Неверный Secret reference: красный run **[URL]**, исправление: зелёный run **[URL]**
-- Невозможный memory request: красный run **[URL]**, исправление: зелёный run **[URL]**
+
+CrashLoopBackOff — возникает после запуска контейнера, когда процесс приложения завершается с ошибкой и Kubernetes повторяет попытки его запуска. В нашем эксперименте приложение не смогло загрузить модель, поскольку путь оказался неверным.
+
+## Ссылки 
+
+- PR: https://github.com/ab21b/shoppers-mlops/pull/1
+- Намеренно сломанный тест: красный run https://github.com/ab21b/shoppers-mlops/actions/runs/43281645555, исправление: зеленый run https://github.com/ab21b/shoppers-mlops/actions/runs/43282960588
+- Неверный MODEL_PATH: https://github.com/ab21b/shoppers-mlops/actions/runs/43286944650 , исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43289325476. Как по логу понять причину: deploy завершился с ошибкой на шаге Deploy API, в разделе Diagnose failed deployment в секции Pods видно CrashLoopBackOff, под не отмечен как ready (0/1), в секции API pod diagnostics сообщение FileNotFoundError: [Errno 2] No such file or directory: 'artifact/nomodel.joblib'
+- Неверный Secret reference: https://github.com/ab21b/shoppers-mlops/actions/runs/43290351504, исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43291659856. Логи: CreateContainerConfigError Warning  Failed     48s (x12 over 3m)  kubelet            Error: secret "shoppers-dbb" not found
+- Невозможный memory request: (https://github.com/ab21b/shoppers-mlops/actions/runs/43292569698), исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43294316956. Логи: shoppers-service-68688d99df-9sg2n   ready: 0/1     status: Pending;
+в Recent events видно Warning   FailedScheduling          pod/shoppers-service-68688d99df-9sg2n    0/1 nodes are available: 1 Insufficient memory.
