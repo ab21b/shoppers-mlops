@@ -118,7 +118,7 @@ CrashLoopBackOff — возникает после запуска контейн
 - Неверный Secret reference: https://github.com/ab21b/shoppers-mlops/actions/runs/43290351504, исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43291659856. Логи: CreateContainerConfigError Warning  Failed     48s (x12 over 3m)  kubelet            Error: secret "shoppers-dbb" not found
 - Невозможный memory request: (https://github.com/ab21b/shoppers-mlops/actions/runs/43292569698), исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43294316956. Логи: shoppers-service-68688d99df-9sg2n   ready: 0/1     status: Pending;
 в Recent events видно Warning   FailedScheduling          pod/shoppers-service-68688d99df-9sg2n    0/1 nodes are available: 1 Insufficient memory.
-## Правки по замечаниям проверяющего
+## Правки по фидбеку
 
 | Замечание | Что исправлено | Где |
 |---|---|---|
@@ -128,4 +128,4 @@ CrashLoopBackOff — возникает после запуска контейн
 | ДЗ 2: job tests использовал `secrets.POSTGRES_PASSWORD`, в PR из fork секрета нет | Для одноразовой тестовой базы задан несекретный пароль `test`; настоящий секрет остался только в job deploy. Healthcheck базы проверяет TCP (`-h 127.0.0.1`) | `.github/workflows/ci.yml`, job tests |
 | ДЗ 2: README без команд | см. первую строку | `README.md` |
 
-Ссылки: PR <ссылка на PR>, зелёный прогон на main после слияния <ссылка на прогон>.
+Ссылки: PR https://github.com/ab21b/shoppers-mlops/actions/runs/44609475942, зеленый прогон на main после слияния https://github.com/ab21b/shoppers-mlops/actions/runs/44609763052.
