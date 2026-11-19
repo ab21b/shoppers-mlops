@@ -23,7 +23,6 @@ PREDICT_PATH = "/v1/predict"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # модель грузится ОДИН раз при старте, не на каждый запрос
     bundle = joblib.load(settings.model_path)
     app.state.pipeline = bundle["pipeline"]
     app.state.meta = bundle["metadata"]
@@ -85,11 +84,15 @@ def predict(x: Features, bg: BackgroundTasks) -> Prediction:
     except Exception:
         log.exception("ошибка инференса, request_id=%s", request_id)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        db.save_prediction(request_id, payload, version, None, None, latency_ms, 500)
-        raise HTTPException(status_code=500, detail=f"inference failed, request_id={request_id}") from None
+        # 500 тоже ложится в журнал (без выдуманного score), а клиент получает request_id, как и в 422
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "inference failed", "request_id": request_id},
+            background=BackgroundTask(db.save_prediction, request_id, payload, version, None, None, latency_ms, 500),
+        )
 
     purchase = score >= app.state.threshold
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-    # запись в БД уходит в фон: ответ не ждёт Postgres
+    
     bg.add_task(db.save_prediction, request_id, payload, version, score, purchase, latency_ms, 200)
     return Prediction(score=score, purchase=purchase, model_version=version, request_id=request_id, latency_ms=latency_ms)
