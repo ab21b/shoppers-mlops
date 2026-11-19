@@ -118,3 +118,14 @@ CrashLoopBackOff — возникает после запуска контейн
 - Неверный Secret reference: https://github.com/ab21b/shoppers-mlops/actions/runs/43290351504, исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43291659856. Логи: CreateContainerConfigError Warning  Failed     48s (x12 over 3m)  kubelet            Error: secret "shoppers-dbb" not found
 - Невозможный memory request: (https://github.com/ab21b/shoppers-mlops/actions/runs/43292569698), исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43294316956. Логи: shoppers-service-68688d99df-9sg2n   ready: 0/1     status: Pending;
 в Recent events видно Warning   FailedScheduling          pod/shoppers-service-68688d99df-9sg2n    0/1 nodes are available: 1 Insufficient memory.
+## Правки по замечаниям проверяющего
+
+| Замечание | Что исправлено | Где |
+|---|---|---|
+| ДЗ 1: в README нет трёх команд проверки | В README: установка с нуля и ровно три команды от чистого клона (тесты, compose, kind), блок «как убедиться», четыре скрина | `README.md` |
+| ДЗ 1: нет теста на сбой инференса | Тест подменяет модель на заглушку с падающим `predict_proba` и проверяет код 500, `request_id` в ответе и в журнале, `score` и `purchase` пустые, сервис жив; такой же тест на настоящем Postgres. Ветка 500 теперь отдаёт `request_id` полем JSON (как 422) и пишет в журнал в фоне | `tests/test_inference_failure.py`, `src/shoppers/service/app.py` |
+| ДЗ 2: smoke делал SELECT сразу после ответов, запись идёт в BackgroundTask | Smoke сохраняет `request_id` обоих ответов и до 20 с ждёт именно их строки с кодами 200 и 422 | `.github/workflows/ci.yml`, шаг Smoke |
+| ДЗ 2: job tests использовал `secrets.POSTGRES_PASSWORD`, в PR из fork секрета нет | Для одноразовой тестовой базы задан несекретный пароль `test`; настоящий секрет остался только в job deploy. Healthcheck базы проверяет TCP (`-h 127.0.0.1`) | `.github/workflows/ci.yml`, job tests |
+| ДЗ 2: README без команд | см. первую строку | `README.md` |
+
+Ссылки: PR <ссылка на PR>, зелёный прогон на main после слияния <ссылка на прогон>.

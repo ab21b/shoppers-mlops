@@ -18,17 +18,17 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_PASSWORD: test
           POSTGRES_DB: shoppers
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d shoppers"
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d shoppers"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 20
     env:
-      DATABASE_URL: postgresql://postgres:${{ secrets.POSTGRES_PASSWORD }}@localhost:5432/shoppers
+      DATABASE_URL: postgresql://postgres:test@localhost:5432/shoppers
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -146,18 +146,32 @@ jobs:
           done
           python -c 'import json; h=json.load(open("/tmp/health.json")); assert h["status"] == "ok", h; assert h["prediction_threshold"] == 0.5, h; print("health/configmap:", h)'
           curl --fail --silent -X POST http://localhost:8080/v1/predict \
-            -H 'Content-Type: application/json' --data @good.json \
-            | python -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r["purchase"], bool), r; assert 0 <= r["score"] <= 1, r; print("prediction:", r)'
+            -H 'Content-Type: application/json' --data @good.json >/tmp/predict.json
+          python -c 'import json; r=json.load(open("/tmp/predict.json")); assert isinstance(r["purchase"], bool), r; assert 0 <= r["score"] <= 1, r; print("prediction:", r)'
           status=$(curl --silent -o /tmp/invalid.json -w '%{http_code}' \
             -X POST http://localhost:8080/v1/predict \
             -H 'Content-Type: application/json' --data '{"BounceRates":-1}')
           test "$status" = "422"
           echo "invalid request HTTP status: $status"
-          success_rows=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc "SELECT count(*) FROM predictions WHERE status_code=200")
-          rejected_rows=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc "SELECT count(*) FROM predictions WHERE status_code=422")
-          echo "PostgreSQL rows: status_code=200 -> $success_rows; status_code=422 -> $rejected_rows"
-          test "$success_rows" -ge 1
-          test "$rejected_rows" -ge 1
+
+          # запись в журнал идёт в BackgroundTask уже после ответа: ждём строки именно этих двух запросов
+          ok_id=$(python -c 'import json; print(json.load(open("/tmp/predict.json"))["request_id"])')
+          bad_id=$(python -c 'import json; print(json.load(open("/tmp/invalid.json"))["request_id"])')
+          row_status() {
+            local rid="$1" code=""
+            for attempt in $(seq 1 20); do
+              code=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc "SELECT status_code FROM predictions WHERE request_id = '$rid'")
+              if [ -n "$code" ]; then echo "$code"; return 0; fi
+              sleep 1
+            done
+            echo "строка $rid не появилась в predictions за 20 с" >&2
+            return 1
+          }
+          ok_code=$(row_status "$ok_id")
+          bad_code=$(row_status "$bad_id")
+          echo "PostgreSQL: $ok_id -> status_code=$ok_code; $bad_id -> status_code=$bad_code"
+          test "$ok_code" = "200"
+          test "$bad_code" = "422"
       - name: Diagnose failed deployment
         if: failure()
         shell: bash
