@@ -52,7 +52,7 @@ def main() -> None:
 
     for tool in ("docker", "kind", "kubectl"):
         if shutil.which(tool) is None:
-            sys.exit(f"не найден `{tool}` в PATH. Установите его (см. REPORT.md, раздел «Что нужно установить»)")
+            sys.exit(f"не найден `{tool}` в PATH. Установите его (см. README.md, раздел «Установка с нуля»)")
 
     if args.delete:
         run("kind", "delete", "cluster", "--name", CLUSTER)
@@ -92,7 +92,7 @@ def main() -> None:
     )
     print(deployment_apply.stdout, end="")
     kubectl("apply", "-f", "k8s/service.yaml")
-    if existed:  # тот же тег 1.0, но образ мог измениться: заставим поды подхватить его
+    if existed:  
         kubectl("rollout", "restart", DEPLOY)
     kubectl("rollout", "status", DEPLOY, "--timeout=180s")
     kubectl("get", "pods", "-o", "wide")
