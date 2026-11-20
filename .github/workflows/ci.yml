@@ -85,108 +85,156 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.image.outputs.image }}
+          provenance: false   # без служебного манифеста аттестации: `kind load` на Docker Desktop иначе может упасть
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
     name: deploy
-    runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Job идёт не в облаке GitHub, а на runner в Docker на вашем ноутбуке, в одной сети с kind:
+    # облако не может достучаться до кластера за NAT, а runner сам подключается к GitHub наружу.
+    runs-on: [self-hosted, kind]
+    concurrency:
+      group: deploy-kind
+      cancel-in-progress: false
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: read
     env:
+      KIND_CLUSTER: mlops   # имя кластера из platform/up.py
       IMAGE: ${{ needs.build.outputs.image }}
       POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
-        with:
-          cluster_name: shoppers-ci
-          node_image: kindest/node:v1.30.4
-      - name: Login and load image into kind
+
+      - name: Runner and tools
         shell: bash
         run: |
+          set -euo pipefail
+          echo "Runner name: ${RUNNER_NAME}"
+          B=~/.local/bin && mkdir -p "$B" && echo "$B" >> "$GITHUB_PATH"
+          case "$(uname -m)" in aarch64|arm64) A=arm64 ;; *) A=amd64 ;; esac
+          [ -x "$B/kind" ]    || curl -sSLo "$B/kind"    "https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-$A"
+          [ -x "$B/kubectl" ] || curl -sSLo "$B/kubectl" "https://dl.k8s.io/v1.37.0/bin/linux/$A/kubectl"
+          command -v jq >/dev/null || [ -x "$B/jq" ] || curl -sSLo "$B/jq" "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-$A"
+          chmod +x "$B"/*
+          export PATH="$B:$PATH"
+          docker version --format 'docker server {{.Server.Version}}'
+          kind version
+          jq --version
+
+      - name: Connect to the kind cluster
+        shell: bash
+        run: |
+          # --internal: адрес API-сервера внутри docker-сети kind (<кластер>-control-plane:6443), runner живёт в этой сети
+          kind export kubeconfig --name "$KIND_CLUSTER" --internal
+          kubectl get nodes
+
+      - name: Login to GHCR and load image into kind
+        shell: bash
+        run: |
+          set -euo pipefail
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker pull "$IMAGE"
-          kind load docker-image "$IMAGE" --name shoppers-ci
+          if ! kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"; then
+            # Docker Desktop с containerd иногда не отдаёт мультиплатформенный образ: грузим архив одной платформы
+            ARCH=$(docker version --format '{{.Server.Arch}}')
+            docker save --platform "linux/$ARCH" "$IMAGE" -o /tmp/image.tar
+            kind load image-archive /tmp/image.tar --name "$KIND_CLUSTER"
+          fi
+
       - name: Create database Secret
         shell: bash
         run: |
           test -n "$POSTGRES_PASSWORD" || { echo "POSTGRES_PASSWORD GitHub Secret is empty"; exit 1; }
+          # dry-run + apply вместо create: на втором деплое create упал бы с AlreadyExists, а apply обновит секрет
           kubectl create secret generic shoppers-db \
             --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
             --from-literal=DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/shoppers" \
             --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Start PostgreSQL
         run: |
           kubectl apply -f k8s/postgres.yaml
           kubectl rollout status deployment/postgres --timeout=120s
-      - name: Apply ConfigMap
-        run: kubectl apply -f k8s/configmap.yaml
+
       - name: Deploy API
         shell: bash
         run: |
+          kubectl apply -f k8s/configmap.yaml
           sed "s|__IMAGE__|${IMAGE}|g" k8s/deployment.yaml | kubectl apply -f -
-          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/service.yaml -f k8s/ingress.yaml -f k8s/hpa.yaml
           kubectl rollout status deployment/shoppers-service --timeout=180s
-      - name: Smoke test API and PostgreSQL audit log
+          kubectl get pods,ingress,hpa -o wide
+
+      - name: Smoke through Ingress
         shell: bash
         run: |
           set -euo pipefail
-          kubectl port-forward service/shoppers-service 8080:80 >/tmp/port-forward.log 2>&1 &
-          PF_PID=$!
-          trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
-          for attempt in $(seq 1 30); do
-            if curl --silent --fail http://localhost:8080/health >/tmp/health.json; then break; fi
-            sleep 2
-          done
-          python -c 'import json; h=json.load(open("/tmp/health.json")); assert h["status"] == "ok", h; assert h["prediction_threshold"] == 0.5, h; print("health/configmap:", h)'
-          curl --fail --silent -X POST http://localhost:8080/v1/predict \
-            -H 'Content-Type: application/json' --data @good.json >/tmp/predict.json
-          python -c 'import json; r=json.load(open("/tmp/predict.json")); assert isinstance(r["purchase"], bool), r; assert 0 <= r["score"] <= 1, r; print("prediction:", r)'
-          status=$(curl --silent -o /tmp/invalid.json -w '%{http_code}' \
-            -X POST http://localhost:8080/v1/predict \
-            -H 'Content-Type: application/json' --data '{"BounceRates":-1}')
+          # runner в сети kind: узел виден по имени, Traefik слушает NodePort 30080. Как ходят пользователи: по Host через Ingress
+          U="http://${KIND_CLUSTER}-control-plane:30080"
+          SVC="Host: shoppers.localhost"
+          REG="Host: mlflow.localhost"
+          MODEL_NAME=$(kubectl get configmap shoppers-config -o jsonpath='{.data.MODEL_NAME}')
+          MODEL_ALIAS=$(kubectl get configmap shoppers-config -o jsonpath='{.data.MODEL_ALIAS}')
+
+          # 1) модель пришла из реестра: версия в /health = версия, на которую сейчас указывает алиас в MLflow
+          curl --fail -sS --retry 10 --retry-all-errors --retry-delay 2 -H "$SVC" "$U/health" | tee /tmp/health.json; echo
+          CHAMP=$(curl --fail -sS -H "$REG" "$U/api/2.0/mlflow/registered-models/alias?name=${MODEL_NAME}&alias=${MODEL_ALIAS}" | jq -r '.model_version.version')
+          EXPECTED="${MODEL_NAME}-v${CHAMP}"
+          echo "registry: ${MODEL_NAME}@${MODEL_ALIAS} -> version ${CHAMP}; ожидаем ${EXPECTED}"
+          jq -e --arg v "$EXPECTED" '.model_source == "registry" and .model_version == $v' /tmp/health.json >/dev/null
+
+          # 2) ответ на наших признаках осмысленный: вероятность в [0,1], класс согласован с порогом из паспорта модели
+          curl --fail -sS -X POST -H "$SVC" -H 'Content-Type: application/json' --data @good.json "$U/v1/predict" | tee /tmp/predict.json; echo
+          THR=$(jq '.prediction_threshold' /tmp/health.json)
+          jq -e --arg v "$EXPECTED" --argjson thr "$THR" \
+            '(.score >= 0 and .score <= 1) and (.purchase == (.score >= $thr)) and (.model_version == $v)' /tmp/predict.json >/dev/null
+
+          # 3) мусор даёт 422 с request_id
+          status=$(curl -sS -o /tmp/invalid.json -w '%{http_code}' -X POST -H "$SVC" -H 'Content-Type: application/json' \
+            --data '{"BounceRates":-1}' "$U/v1/predict")
           test "$status" = "422"
           echo "invalid request HTTP status: $status"
 
-          # запись в журнал идёт в BackgroundTask уже после ответа: ждём строки именно этих двух запросов
-          ok_id=$(python -c 'import json; print(json.load(open("/tmp/predict.json"))["request_id"])')
-          bad_id=$(python -c 'import json; print(json.load(open("/tmp/invalid.json"))["request_id"])')
-          row_status() {
-            local rid="$1" code=""
+          # 4) в базе лежат строки ровно этих двух запросов. Запись идёт в BackgroundTask после ответа: ждём, а не угадываем
+          row() {
+            local rid="$1" out=""
             for attempt in $(seq 1 20); do
-              code=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc "SELECT status_code FROM predictions WHERE request_id = '$rid'")
-              if [ -n "$code" ]; then echo "$code"; return 0; fi
+              out=$(kubectl exec deployment/postgres -- psql -U postgres -d shoppers -Atc \
+                "SELECT status_code || ',' || model_version FROM predictions WHERE request_id = '$rid'")
+              if [ -n "$out" ]; then echo "$out"; return 0; fi
               sleep 1
             done
             echo "строка $rid не появилась в predictions за 20 с" >&2
             return 1
           }
-          ok_code=$(row_status "$ok_id")
-          bad_code=$(row_status "$bad_id")
-          echo "PostgreSQL: $ok_id -> status_code=$ok_code; $bad_id -> status_code=$bad_code"
-          test "$ok_code" = "200"
-          test "$bad_code" = "422"
+          ok_row=$(row "$(jq -r .request_id /tmp/predict.json)")
+          bad_row=$(row "$(jq -r .request_id /tmp/invalid.json)")
+          echo "PostgreSQL: ok request -> ${ok_row}; invalid request -> ${bad_row}"
+          test "$ok_row" = "200,${EXPECTED}"
+          test "${bad_row%%,*}" = "422"
+
       - name: Diagnose failed deployment
         if: failure()
         shell: bash
         run: |
           echo '=== Pods ==='
           kubectl get pods -o wide || true
-          echo '=== Deployments ==='
-          kubectl get deployments || true
+          kubectl get deployments,ingress,hpa || true
+          echo '=== MLflow ==='
+          kubectl -n mlops get pods || true
           echo '=== Recent events ==='
-          kubectl get events --sort-by=.lastTimestamp || true
+          kubectl get events --sort-by=.lastTimestamp | tail -30 || true
           echo '=== API pod diagnostics ==='
           for pod in $(kubectl get pods -l app=shoppers -o name 2>/dev/null); do
-            kubectl describe "$pod" || true
-            kubectl logs "$pod" -c api --tail=100 || true
+            kubectl describe "$pod" | tail -40 || true
+            kubectl logs "$pod" -c api --tail=40 || true
           done
           echo '=== PostgreSQL diagnostics ==='
           kubectl get pods -l app=postgres -o wide || true
-          kubectl logs deployment/postgres --tail=100 || true
+          kubectl logs deployment/postgres --tail=30 || true
