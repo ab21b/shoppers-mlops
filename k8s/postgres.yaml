@@ -31,6 +31,7 @@ spec:
             exec:
               command: ["sh", "-c", "pg_isready -U postgres -d shoppers"]
             periodSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 20
           resources:
             requests:

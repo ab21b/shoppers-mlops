@@ -85,7 +85,7 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.image.outputs.image }}
-          provenance: false   # без служебного манифеста аттестации: `kind load` на Docker Desktop иначе может упасть
+          provenance: false  
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -93,8 +93,6 @@ jobs:
     name: deploy
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # Job идёт не в облаке GitHub, а на runner в Docker на вашем ноутбуке, в одной сети с kind:
-    # облако не может достучаться до кластера за NAT, а runner сам подключается к GitHub наружу.
     runs-on: [self-hosted, kind]
     concurrency:
       group: deploy-kind
@@ -104,7 +102,7 @@ jobs:
       contents: read
       packages: read
     env:
-      KIND_CLUSTER: mlops   # имя кластера из platform/up.py
+      KIND_CLUSTER: mlops   
       IMAGE: ${{ needs.build.outputs.image }}
       POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
     steps:
@@ -168,7 +166,7 @@ jobs:
           kubectl apply -f k8s/configmap.yaml
           sed "s|__IMAGE__|${IMAGE}|g" k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml -f k8s/ingress.yaml -f k8s/hpa.yaml
-          kubectl rollout status deployment/shoppers-service --timeout=180s
+          kubectl rollout status deployment/shoppers-service --timeout=300s
           kubectl get pods,ingress,hpa -o wide
 
       - name: Smoke through Ingress
