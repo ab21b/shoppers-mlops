@@ -3,6 +3,8 @@ kind: ConfigMap
 metadata:
   name: shoppers-config
 data:
-  MODEL_PATH: "artifact/model.joblib"
+  MODEL_PATH: "artifact/model.joblib"   
   LOG_LEVEL: "INFO"
-  PREDICTION_THRESHOLD: "0.5"
+  MLFLOW_TRACKING_URI: "http://mlflow.mlops:5000" 
+  MODEL_NAME: "shoppers-rf"
+  MODEL_ALIAS: "champion"

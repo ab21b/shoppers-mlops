@@ -1,131 +1,145 @@
-# Сервис для модели RandomForest
+# Платформа, реестр моделей, CI/CD в kind, DVC, HPA
 
+Репозиторий: . Отчет по домашкам 1 и 2: [REPORT_HW1_HW2.md](REPORT_HW1_HW2.md).
 
-### Модель и паспорт
+## 1. Таблица предъявленного
 
-- Данные: 12330 строк, дубли удалены (12205), пропусков нет, доля покупок 15.6%.
-- Pipeline одним объектом: `log1p` + median-imputer, `OneHotEncoder(handle_unknown="ignore")` для `Month, VisitorType, OperatingSystems, Browser, Region, TrafficType`. Препроцессинг внутри пайплайна: сервис получает сырые признаки.
-- Метрики на тесте: ROC-AUC 0.9345, PR-AUC 0.7578, F1 0.6958, recall 0.7094.
-- `metadata`: `model_version`, `features` (17 штук в порядке датасета), `threshold`, метрики, параметры, версия sklearn, дата.
+| Пункт | Ссылка или скрин |
+|---|---|
+| 2.1 `kubectl get pods,ingress -A` | `docs/screens/h3_01_get_pods_ingress.png` |
+| 2.1 MLflow на http://mlflow.localhost, режим Model training | `docs/screens/h3_02_mlflow_home.png` |
+| 2.2 Три запуска `train.py` с решением гейта | `docs/screens/h3_03_train_runs.png`, раздел 3 |
+| 2.2 Model registry: версии и колонка Aliases | `docs/screens/h3_04_registry_aliases.png` |
+| 2.2 Артефакт прогона (PR-кривая) | `docs/screens/h3_05_run_artifacts.png` |
+| 2.3 `/health` до и после отката, время отката | раздел 4 |
+| 2.4 Зеленый прогон, в логе deploy виден Runner name | <ссылка на прогон> |
+| 2.4 Settings, Actions, Runners | `docs/screens/h3_06_runners.png` |
+| 2.5 Файл `data/online_shoppers_intention.csv.dvc` | в репозитории |
+| 2.5 `dvc push`, `dvc diff`, `dvc pull` в чистом клоне | `docs/screens/h3_07_dvc.png`, раздел 5 |
+| 2.5 Два прогона с разными `data_md5` | `docs/screens/h3_08_two_data_md5.png` |
+| 2.6 HPA: реплики растут и падают, `describe hpa` | `docs/screens/h3_09_hpa.png`, `docs/screens/h3_10_k9s_hpa.png` |
+| 2.6 Таблица трех прогонов locust, requests до и после | раздел 6 |
+| 2.7 Три красных прогона | раздел 7 |
+| Восемь вопросов, журнал проблем | разделы 8 и 9 |
 
-### Схема запроса
+## 2. Как воспроизвести
 
-17 фичей, `extra="forbid"`, границы из смысла и датасета: счётчики `ge=0`, доли `BounceRates/ExitRates/SpecialDay` в `[0, 1]`, `OperatingSystems 1..8`, `Browser 1..13`, `Region 1..9`, `TrafficType 1..20`, `Month` и `VisitorType` как `Literal` из значений датасета, `Weekend: bool`.
+Нужны: Docker Desktop, kind, kubectl, helm, uv, git (README, «Установка с нуля»).
 
-Про опциональные поля: в этом датасете пропусков нет, поэтому обязательны все поля. Для `SimpleImputer` тест проверяет, что NaN и незнакомая категория не роняют инференс.
+1. `uv run python platform/up.py`: кластер `mlops` (порт 80), Traefik, MLflow, metrics-server.
+2. `uv run dvc pull`: данные из хранилища DVC (рядом с репозиторием лежит папка `dvc-storage`).
+3. Три запуска обучения (README, раздел «Платформа…»): MAX_DEPTH = 4, 2, 11.
+4. Runner (токен берется в Settings, Actions, Runners, New self-hosted runner):
 
-Ограничение схемы: `Month` принимает только 10 месяцев из датасета (январь и апрель в данных нет), остальные дают 422.
+   ```powershell
+   docker run -d --name gh-runner --restart unless-stopped --network kind `
+     -v /var/run/docker.sock:/var/run/docker.sock --group-add 0 `
+     -e REPO_URL="https://github.com/ab21b/shoppers-mlops" -e RUNNER_NAME="gh-runner" `
+     -e RUNNER_TOKEN="<ТОКЕН>" -e LABELS="kind" myoung34/github-runner:latest
+   ```
+5. Push в `main` через pull request: tests и build идут в облаке, deploy на runner.
 
-### Логи
+## 3. Обучение, реестр и гейт
 
-Таблица `predictions`: `request_id uuid PK, ts, model_version, features jsonb, score, purchase, latency_ms, status_code`.
+**Метрика гейта: PR-AUC, `MIN_GAIN = 0.005`.** Покупают около 15.5% сессий, при таком дисбалансе ROC-AUC оптимистичен: огромное число «легких» отрицательных примеров почти не снижает его, даже когда покупатели находятся плохо. PR-AUC оценивает именно поиск покупателей. Запас взят из измеренного шума: при фиксированных данных и гиперпараметрах (`max_depth=11`) PR-AUC на отложенной выборке для восьми разных random_state леса дает среднее 0.7437, стандартное отклонение 0.0010, размах 0.0026 (*). `MIN_GAIN = 0.005` примерно в пять раз больше стандартного отклонения и вдвое больше всего размаха: улучшение меньше этого от случайности не отличить, и перевешивать `champion` ради него не стоит.
 
-- `status_code` (новое поле) пишется для всех запросов к `/v1/predict`: 200, 422 (валидация; в `features` сырое тело запроса, `score` пустой), 500 (сбой инференса).
-- Без `DATABASE_URL` сервис работает и просто не логирует.
+Три запуска (замените вывод своим):
 
+| Запуск | MAX_DEPTH | PR-AUC | Версия | Решение гейта | Алиасы после |
+|---|---|---|---|---|---|
+| 1 | 4 | 0.7320 | 1 | champion еще нет: проходит | challenger=1, champion=1 |
+| 2 | 2 | 0.6994 | 2 | хуже champion: не проходит | challenger=2, champion=1 |
+| 3 | 11 | 0.7466 | 3 | лучше 0.7320 на 0.0146 > 0.005: проходит | challenger=3, champion=3 |
 
-## 3. Скрины чекпоинтов
+Артефакты прогона, которых не было на семинаре: `pr_curve.png` (PR-кривая с отмеченным порогом) и `feature_importance.png`. В параметрах прогона есть `data_md5` и `git_commit`.
 
+## 4. Сервис по алиасу и откат модели
 
-**1. pytest**  
+Сервис при старте спрашивает у реестра `shoppers-rf@champion`; без `MODEL_NAME` грузит файл (так идут тесты в CI).
 
-```bash
-uv run pytest
-```
+| Момент | `/health` |
+|---|---|
+| До отката | <вывод curl> |
+| После отката (champion перевешен на версию 1, `rollout restart`) | <вывод curl> |
 
-![pytest](docs/screens/01_pytest.png)
+От клика в UI до ответа старой версии прошло <N> секунд (`scripts/rollback_timer.py`).
 
-**2. SELECT из логов** После `docker compose up -d --build` специально один хороший и один плохой запрос:
+## 5. Данные в DVC
 
-```bash
-curl -X POST localhost:8000/v1/predict -H "Content-Type: application/json" -d @good.json
-curl -X POST localhost:8000/v1/predict -H "Content-Type: application/json" -d @bad.json
-docker compose exec db psql -U postgres -d shoppers -c "SELECT request_id, ts, score, purchase, latency_ms, status_code FROM predictions ORDER BY ts DESC LIMIT 5;"
-```
+- v1: исходный файл, md5 `<md5 из .dvc>`, 12330 строк.
+- v2: убраны полные дубли (125 строк), md5 `<md5>`, 12205 строк. `dvc diff HEAD~1` показывает `Modified: data/online_shoppers_intention.csv`.
+- Откат туда и обратно, `dvc pull` в чистом клоне: <вывод или скрин>.
+- Прогоны в MLflow: v1 `data_md5 = <...>`, v2 `data_md5 = <...>`.
 
-![select](docs/screens/02_select_logs.png)
+Оговорка: метрики на v1 и v2 посчитаны на разных отложенных выборках (число строк разное), поэтому сравнивать их в гейте не вполне корректно. `train.py` печатает предупреждение, если `data_md5` текущего champion отличается.
 
-**3. get pods + ответ predict через port-forward**  Водном окне `uv run python scripts/kind_up.py --keep` (port-forward остается открытым), во втором окне:
+## 6. Автомасштабирование
 
-```bash
-kubectl get pods
-kubectl get deploy
-curl -X POST localhost:8080/v1/predict -H "Content-Type: application/json" -d @good.json
-```
+| Прогон locust | Пользователи | Реплики (пик) | p95, мс | CPU на под (`kubectl top pods`) |
+|---|---|---|---|---|
+| 1 | <20> | <...> | <...> | <...> |
+| 2 | <60> | <...> | <...> | <...> |
+| 3 | <100> | <...> | <...> | <...> |
 
+События `kubectl describe hpa` со строками `SuccessfulRescale`: <*>.
 
-![pods and predict](docs/screens/03_get_pods_and_predict.png)
+requests.memory: под занимал <N> МиБ под нагрузкой, плюс запас около трети дает <N×1.33>. Было `256Mi`, стало `<...>`. requests.cpu: <...>.
 
-**4. k9s**  
+## 7. Три красных прогона с диагнозом
 
-```bash
-k9s --context kind-mlpro
-```
+Для каждой поломки: какой job красный, на каком шаге, статус пода, что напечатал лог.
 
-![k9s](docs/screens/04_k9s.png)
+### 7.1 Модели нет в реестре (`MODEL_ALIAS: prod`)
 
-## 4. Журнал проблем
+- Красный: <ссылка>. Зеленый после починки: <ссылка>.
+- Шаг и статус пода: <deploy / Deploy API: `rollout status` по таймауту; поды `CrashLoopBackOff`>.
+- Лог: <в шаге диагностики: `RestException: INVALID_PARAMETER_VALUE: Registered model alias prod not found.` и `Application startup failed. Exiting.`>.
+- Как понять причину без diff: <2-3 предложения. Ориентир: tests и build зеленые (они идут на файле), красный только deploy; под не доходит до Ready, а в логе контейнера названы и модель, и алиас.>
 
-| # | Что не получилось | Ошибка | Решение |
-|---|---|---|---|
-| 1 | `docker compose up -d --build`: контейнер api не стартовал | Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint shoppers-mlops-api-1 (...): Bind for 0.0.0.0:8000 failed: port is already allocated | Был активен старый контейнер с прошлого запуска этого проекта пришлось снести его docker stop online_shoppers_mlops-api-1 online_shoppers_mlops-db-1|
-| 2 | `SELECT ... FROM predictions`|  relation "predictions" does not exist| запросы уходили в старый api и писались в его базу. После освобождения порта и пересоздания стека таблица появилась |
+### 7.2 Runner не видит кластер (неверный `KIND_CLUSTER`)
 
----
+- Красный: <ссылка>. Зеленый после починки: <ссылка>.
+- Шаг: <deploy / Connect to the kind cluster, самый первый шаг после инструментов>.
+- Лог: <ошибка kind про кластер с таким именем; до kubectl и подов дело не дошло, диагностика ничего не покажет>.
+- Как понять причину без diff: <2-3 предложения. Ориентир: поды даже не создавались, упал первый шаг, где имя кластера используется.>
 
-# Домашняя работа 2. CI/CD
+### 7.3 Ingress мимо (host в `k8s/ingress.yaml` не тот, что в smoke)
 
-## 1. Сколько секунд шёл job build в первом прогоне и сколько во втором? Какой слой Dockerfile взят из кэша и почему именно он?
+- Красный: <ссылка>. Зеленый после починки: <ссылка>.
+- Шаг и статус пода: <deploy / Smoke through Ingress; все поды `Running` и Ready, rollout прошел>.
+- Лог: <`curl: (22) The requested URL returned error: 404`>.
+- Как понять причину без diff: <2-3 предложения. Ориентир: сервис здоров, но Traefik не нашел правило для этого Host и отвечает 404; значит, дело не в подах, а в Ingress.>
 
-В первом 1 минуту 12 секунд https://github.com/ab21b/shoppers-mlops/actions/runs/43283718969 во втором 25 секунд https://github.com/ab21b/shoppers-mlops/actions/runs/43286944650. Все слои 11-17 имет статус CACHED. #13 [stage-0 5/8] RUN uv sync --frozen --no-dev --no-install-project
-#13 CACHED Слой использовался с кэша так как файлы pyproject.toml, uv.lock и .python-version не изменились
+## 8. Восемь вопросов
 
-## 2. В логе deploy во время выката видны поды в ImagePullBackOff, а прогон при этом зелёный. Откуда эти поды и почему это не ошибка?
+**1. Почему tests и build идут в облаке GitHub, а deploy не может? Какие еще есть способы доставить код в кластер за NAT и почему мы выбрали runner?**
+Tests и build ничего не требуют от вашего ноутбука: код и реестр доступны из интернета. Deploy должен достучаться до API-сервера kind, а он слушает только на вашей машине за NAT, и облако GitHub не может открыть к нему соединение. Альтернативы: открыть кластер наружу через туннель (ngrok, Cloudflare Tunnel) или VPN (Tailscale), что публикует API-сервер, либо pull-подход (Argo CD или Flux внутри кластера сами следят за репозиторием). Runner выбран потому, что он сам делает исходящее соединение к GitHub, ничего не открывая наружу, и укладывается в тот же workflow.
 
-отдельный проблемный Pod не обязательно означает, что весь Deployment неработоспособен.
+**2. Зачем runner запущен с `--network kind`, сокетом Docker и `--group-add 0`? Что сломается без каждого из трех?**
+`--network kind`: runner должен видеть узел кластера по имени (`mlops-control-plane:6443` для API и `:30080` для Ingress); без этого `kubectl` и smoke дают `no such host` или таймаут. Сокет Docker: `docker pull` и `kind load` работают с демоном хоста, где живут контейнеры-узлы kind; без сокета будет `Cannot connect to the Docker daemon`. `--group-add 0`: сокет принадлежит группе root, а процесс runner работает от обычного пользователя; без группы будет `permission denied while trying to connect to the Docker daemon socket`.
 
-## 3. Какой путь проходит пароль базы от страницы настроек GitHub до переменной окружения в поде? Почему его нельзя положить в configmap.yaml?
+**3. Почему `create secret` заменили на `--dry-run=client -o yaml | kubectl apply`? Что будет при втором деплое без этой замены?**
+`kubectl create` падает, если объект уже есть: на втором деплое будет `Error from server (AlreadyExists): secrets "shoppers-db" already exists`. Связка с `apply` одинаково работает на первом и втором деплое: создает секрет или обновляет, а значит и смена пароля в GitHub Secrets доедет до кластера.
 
-Пароль базы хранится в GitHub в разделе Actions под именем POSTGRES_PASSWORD. В workflow он передаётся через ${{ secrets.POSTGRES_PASSWORD }}, после чего используется для создания Kubernetes Secret с именем shoppers-db. Затем в k8s/deployment.yaml через secretKeyRef контейнер получает нужное значение в переменную окружения. Пароль нельзя хранить в configmap.yaml, поскольку ConfigMap предназначен для несекретных настроек, а для конфиденциальных данных Kubernetes предоставляет Secret.
+**4. Чем challenger отличается от champion? Почему сервис просит алиас, а не номер версии? Сравните откат модели через алиас с откатом кода через `rollout undo`.**
+Challenger это свежая версия-кандидат (получает его каждая новая версия), champion это версия, которая прошла гейт и обслуживает трафик. Сервис просит алиас, потому что смена модели становится изменением метаданных реестра: не нужно ни править ConfigMap, ни коммитить, ни пересобирать образ. Откат модели: перевесить алиас и `rollout restart` (поды при старте заново спросят реестр), образ и манифесты не трогаются. `rollout undo` откатывает Deployment к предыдущему ReplicaSet, то есть образ и конфигурацию кода, а модель (она в реестре) остается прежней.
 
-## 4. Уберите мысленно needs: tests у job build. Опишите сценарий, в котором это закончится плохо.
+**5. Что будет, если задеплоить сервис в кластер, где никто еще не обучил модель? Как это увидеть в k9s и в логе CI?**
+Алиаса `champion` нет, при старте реестр отвечает `Registered model alias champion not found`, исключение в lifespan роняет процесс, под уходит в `CrashLoopBackOff` и никогда не становится Ready, поэтому трафик на него не идет. В k9s такие поды красные с растущим числом рестартов, в логе CI `rollout status` упирается в таймаут, а шаг диагностики печатает ту же ошибку из `kubectl logs`.
 
-Если убрать needs: tests, job build сможет выполняться независимо от результата тестирования. Например, если в коде обнаружится ошибка и pytest завершится неудачно, сборка Docker-образа всё равно может пройти и опубликовать образ в GHCR. В результате может быть опубликована и потенциально развёрнута версия приложения, которая не прошла проверки. Поэтому зависимость needs: tests нужна, чтобы сборка начиналась только после успешного завершения тестов.
+**6. Проследите запрос от браузера до пода MLflow. Зачем MLflow нужны `--allowed-hosts` и `--cors-allowed-origins`, и почему порт 80 задается при создании кластера?**
+Браузер идет на `http://mlflow.localhost`, порт 80, Host `mlflow.localhost`; ОС отправляет имя на 127.0.0.1. Docker пробрасывает порт 80 хоста в контейнер-узел kind на порт 30080 (`extraPortMappings`). Там NodePort Service Traefik; под Traefik (Ingress-контроллер) смотрит на правила Ingress, по Host выбирает `Service mlflow:5000`, а тот ведет на под MLflow (порт 5000). `--allowed-hosts` защищает от DNS-rebinding: сервер отвечает только на перечисленные имена хоста (иначе `Invalid Host header`), а `--cors-allowed-origins` разрешает интерфейсу в браузере ходить в API со страницы `http://mlflow.localhost`. Порт 80 нужен при создании кластера, потому что проброс портов узла задается при создании контейнера и изменить его на работающем нельзя: придется пересоздавать кластер.
 
-## 5. Почему на pull request у вас бегут только тесты, а build и deploy нет? Какая строка за это отвечает и зачем так сделано?
-if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-Тесты запускаются при событиях pull_request и push, поскольку для job tests нет ограничения только на основную ветку. Это сделано для того, чтобы проверять код на Pull Request, но не публиковать Docker-образы и не выполнять развёртывание до слияния изменений в основную ветку.
+**7. Посчитайте по формуле из лекции 3.1, сколько реплик HPA должен был выставить при вашей загрузке CPU, и сравните с тем, что он выставил. Почему вниз реплики уходили дольше, чем вверх?**
+Формула: `desired = ceil(current × текущая_загрузка / целевая)`. У меня при <N> репликах загрузка была <X>% от requests при цели 60%, то есть `ceil(<N> × <X> / 60) = <расчет>`; HPA выставил <факт> (максимум ограничен `maxReplicas=6`). Вверх HPA реагирует сразу, а вниз действует окно стабилизации (по умолчанию 300 секунд): он берет наибольшую рекомендацию за последние пять минут, чтобы не дергать число реплик на каждом провале нагрузки; поэтому у меня сжатие началось через <N> минут после остановки locust.
 
-## 6. Зачем в init() стоит pg_advisory_xact_lock? Что произойдёт без него при двух репликах и пустой базе? Реплики чего именно здесь имеются в виду?
-для синхронизации инициализации базы данных. Если база пустая и две реплики приложения запустятся одновременно, обе могут попытаться создать одну и ту же таблицу. Блокировка позволяет одной транзакции выполнить инициализацию первой, а второй дождаться её завершения, предотвращая гонку при создании схемы. Под двумя репликами здесь имеются в виду два Pod API-приложения, указанные в k8s/deployment.yaml, а не две реплики PostgreSQL.
+**8. Что лежит в git, а что в хранилище DVC? Как восстановить ровно те данные, на которых обучена версия N модели?**
+В git лежат код, `.dvc/config` и маленький указатель `data/online_shoppers_intention.csv.dvc` с md5 и размером; сам CSV в `.gitignore`. Содержимое файла лежит в хранилище DVC (папка `../dvc-storage`) под своим md5. Восстановление: 1) в MLflow открыть версию N, перейти к ее прогону и взять параметр `data_md5`; 2) найти коммит, где в указателе был этот md5: `git log -S<md5> -- data/online_shoppers_intention.csv.dvc`; 3) `git checkout <коммит> -- data/online_shoppers_intention.csv.dvc`; 4) `uv run dvc checkout` (или `dvc pull`); 5) проверить, что md5 файла совпал с `data_md5` из прогона.
 
-## 7. В трёх ваших красных прогонах поды застряли в трёх разных статусах. Расположите эти статусы в порядке жизни пода и объясните, на каком шаге возникает каждый.
-Pending — возникает на этапе планирования Pod, когда Kubernetes не может назначить его на узел с достаточными ресурсами. В нашем эксперименте это произошло из-за слишком большого запроса памяти.
+## 9. Журнал проблем
 
+Формат: что не получилось, текст ошибки, как нашли причину, как починили. Только реально случившееся.
 
-
-CreateContainerConfigError — возникает на этапе подготовки контейнера, когда Kubernetes не может сформировать его конфигурацию. В нашем случае причиной стало обращение к несуществующему Secret.
-
-
-
-CrashLoopBackOff — возникает после запуска контейнера, когда процесс приложения завершается с ошибкой и Kubernetes повторяет попытки его запуска. В нашем эксперименте приложение не смогло загрузить модель, поскольку путь оказался неверным.
-
-## Ссылки 
-
-- PR: https://github.com/ab21b/shoppers-mlops/pull/1
-- Намеренно сломанный тест: красный run https://github.com/ab21b/shoppers-mlops/actions/runs/43281645555, исправление: зеленый run https://github.com/ab21b/shoppers-mlops/actions/runs/43282960588
-- Неверный MODEL_PATH: https://github.com/ab21b/shoppers-mlops/actions/runs/43286944650 , исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43289325476. Как по логу понять причину: deploy завершился с ошибкой на шаге Deploy API, в разделе Diagnose failed deployment в секции Pods видно CrashLoopBackOff, под не отмечен как ready (0/1), в секции API pod diagnostics сообщение FileNotFoundError: [Errno 2] No such file or directory: 'artifact/nomodel.joblib'
-- Неверный Secret reference: https://github.com/ab21b/shoppers-mlops/actions/runs/43290351504, исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43291659856. Логи: CreateContainerConfigError Warning  Failed     48s (x12 over 3m)  kubelet            Error: secret "shoppers-dbb" not found
-- Невозможный memory request: (https://github.com/ab21b/shoppers-mlops/actions/runs/43292569698), исправление: https://github.com/ab21b/shoppers-mlops/actions/runs/43294316956. Логи: shoppers-service-68688d99df-9sg2n   ready: 0/1     status: Pending;
-в Recent events видно Warning   FailedScheduling          pod/shoppers-service-68688d99df-9sg2n    0/1 nodes are available: 1 Insufficient memory.
-## Правки по фидбеку
-
-| Замечание | Что исправлено | Где |
-|---|---|---|
-| ДЗ 1: в README нет трёх команд проверки | В README: установка с нуля и ровно три команды от чистого клона (тесты, compose, kind), блок «как убедиться», четыре скрина | `README.md` |
-| ДЗ 1: нет теста на сбой инференса | Тест подменяет модель на заглушку с падающим `predict_proba` и проверяет код 500, `request_id` в ответе и в журнале, `score` и `purchase` пустые, сервис жив; такой же тест на настоящем Postgres. Ветка 500 теперь отдаёт `request_id` полем JSON (как 422) и пишет в журнал в фоне | `tests/test_inference_failure.py`, `src/shoppers/service/app.py` |
-| ДЗ 2: smoke делал SELECT сразу после ответов, запись идёт в BackgroundTask | Smoke сохраняет `request_id` обоих ответов и до 20 с ждёт именно их строки с кодами 200 и 422 | `.github/workflows/ci.yml`, шаг Smoke |
-| ДЗ 2: job tests использовал `secrets.POSTGRES_PASSWORD`, в PR из fork секрета нет | Для одноразовой тестовой базы задан несекретный пароль `test`; настоящий секрет остался только в job deploy. Healthcheck базы проверяет TCP (`-h 127.0.0.1`) | `.github/workflows/ci.yml`, job tests |
-| ДЗ 2: README без команд | см. первую строку | `README.md` |
-
-Ссылки: PR https://github.com/ab21b/shoppers-mlops/actions/runs/44609475942, зеленый прогон на main после слияния https://github.com/ab21b/shoppers-mlops/actions/runs/44609763052.
+| # | Что не получилось | Текст ошибки | Как нашли причину | Как починили |
+|---|---|---|---|---|
+| 1 | | | | |

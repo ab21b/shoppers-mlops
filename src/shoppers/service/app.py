@@ -3,7 +3,6 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-import joblib
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -13,6 +12,7 @@ from starlette.background import BackgroundTask
 
 from shoppers import db
 from shoppers.config import settings
+from shoppers.model_store import load_model
 from shoppers.schemas import Features, Prediction
 
 logging.basicConfig(level=settings.log_level)
@@ -23,10 +23,8 @@ PREDICT_PATH = "/v1/predict"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    bundle = joblib.load(settings.model_path)
-    app.state.pipeline = bundle["pipeline"]
-    app.state.meta = bundle["metadata"]
-    app.state.version = bundle["metadata"]["model_version"]
+    app.state.pipeline, app.state.meta, app.state.version = load_model()
+    app.state.source = "registry" if settings.model_name else "file"
     app.state.threshold = (
         settings.prediction_threshold
         if settings.prediction_threshold is not None
@@ -45,14 +43,13 @@ app = FastAPI(title="shoppers-service", version="1.0", lifespan=lifespan,
 
 @app.get("/health")
 def health():
-    """Liveness: процесс жив. Модель не проверяем: перезапуск пода тут не поможет."""
     return {"status": "ok", "model_version": getattr(app.state, "version", "unknown"),
+            "model_source": getattr(app.state, "source", "unknown"),
             "prediction_threshold": getattr(app.state, "threshold", None)}
 
 
 @app.get("/ready")
 def ready():
-    """Readiness: модель загружена, можно слать трафик."""
     if getattr(app.state, "pipeline", None) is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     return {"status": "ready", "model_version": app.state.version}
@@ -60,14 +57,13 @@ def ready():
 
 @app.exception_handler(RequestValidationError)
 async def on_validation_error(request: Request, exc: RequestValidationError):
-    """422 тоже логируем: в таблице видно и мусорные запросы с кодом ответа."""
     request_id = str(uuid.uuid4())
     body = jsonable_encoder({"detail": exc.errors(), "request_id": request_id})
     bg = None
     if request.url.path == PREDICT_PATH:
         raw = exc.body if isinstance(exc.body, dict) else {"_raw": str(exc.body)[:2000]}
         bg = BackgroundTask(db.save_prediction, request_id, jsonable_encoder(raw),
-                            getattr(request.app.state, "version", "unknown"), None, None, 0.0, 422)  # fmt: skip
+                            getattr(request.app.state, "version", "unknown"), None, None, 0.0, 422)  
     return JSONResponse(status_code=422, content=body, background=bg)
 
 
@@ -79,12 +75,11 @@ def predict(x: Features, bg: BackgroundTasks) -> Prediction:
     version = app.state.version
     try:
         frame = pd.DataFrame([payload]).reindex(columns=app.state.meta["features"])
-        frame["Weekend"] = frame["Weekend"].astype(int)  # в обучении Weekend был 0/1
+        frame["Weekend"] = frame["Weekend"].astype(int) 
         score = float(app.state.pipeline.predict_proba(frame)[0, 1])
     except Exception:
         log.exception("ошибка инференса, request_id=%s", request_id)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        # 500 тоже ложится в журнал (без выдуманного score), а клиент получает request_id, как и в 422
         return JSONResponse(
             status_code=500,
             content={"detail": "inference failed", "request_id": request_id},
@@ -93,6 +88,5 @@ def predict(x: Features, bg: BackgroundTasks) -> Prediction:
 
     purchase = score >= app.state.threshold
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-    
     bg.add_task(db.save_prediction, request_id, payload, version, score, purchase, latency_ms, 200)
     return Prediction(score=score, purchase=purchase, model_version=version, request_id=request_id, latency_ms=latency_ms)
