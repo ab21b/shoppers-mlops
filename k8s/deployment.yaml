@@ -31,27 +31,18 @@ spec:
             preStop:
               sleep: {seconds: 5}    
           startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
+            httpGet: {path: /health, port: 8000}
             periodSeconds: 2
-            failureThreshold: 30
+            timeoutSeconds: 3
+            failureThreshold: 90      
           livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
+            httpGet: {path: /health, port: 8000}
             periodSeconds: 10
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
-            httpGet:
-              path: /ready
-              port: 8000
+            httpGet: {path: /ready, port: 8000}
             periodSeconds: 5
+            timeoutSeconds: 3
             failureThreshold: 3
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 768Mi
+            
