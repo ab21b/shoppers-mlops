@@ -1,161 +1,81 @@
 # shoppers-service: вероятность покупки в интернет-магазине
-Random Forest на датасете [Online Shoppers Purchasing Intention](https://www.kaggle.com/datasets/imakash3011/online-shoppers-purchasing-intention-dataset), обёрнутый в FastAPI-сервис с журналированием запросов в PostgreSQL, Docker Compose и Kubernetes (kind).
 
-ROC-AUC на отложенной тестовой выборке: 0.934. Подробности обучения, архитектуры и экспериментов приведены в [REPORT.md](REPORT.md).
+[![ci](https://github.com/ab21b/shoppers-mlops/actions/workflows/ci.yml/badge.svg)](https://github.com/ab21b/shoppers-mlops/actions/workflows/ci.yml)
 
-## 1. Структура проекта
+Random Forest на датасете [Online Shoppers Purchasing Intention](https://www.kaggle.com/datasets/imakash3011/online-shoppers-purchasing-intention-dataset)
+в виде FastAPI-сервиса: логи запросов в Postgres, Docker/compose, Kubernetes (kind), CI/CD в GitHub Actions.
+ROC-AUC на отложенном тесте 0.934, порог классификации 0.393.
+Отчет по платформе, реестру моделей, DVC, HPA: [REPORT.md](REPORT.md). Отчет по предыдущим этапам: [REPORT_HW1_HW2.md](REPORT_HW1_HW2.md).
 
-- `artifact/model.joblib` — обученная модель и metadata.
-- `src/shoppers/` — FastAPI-приложение, схема запроса, настройки и работа с PostgreSQL.
-- `tests/` — unit-, contract- и integration-тесты.
-- `good.json` — пример корректного запроса.
-- `bad.json` — пример некорректного запроса.
-- `compose.yaml` — конфигурация API и PostgreSQL для Docker Compose.
-- `k8s/` — Kubernetes-манифесты.
-- `scripts/kind_up.py` — сборка образа и локальное развёртывание в kind.
-- `REPORT.md` — подробный отчет и результаты проверок.
+## Требования
 
-## 2. Требования
+Python 3.11, uv, Docker Desktop, kind, kubectl, k9s, Helm
 
-Python 3.11, uv, Docker Desktop, kind, kubectl, k9s.
+После установки откройте терминал заново и проверьте: `uv --version`, `git --version`, `docker ps`, `kind --version`, `kubectl version --client`.
+Порты 8000 (compose) и 8080 (port-forward kind) должны быть свободны.
 
-## 3. Проверка 
-
+## Проверка
 
 ```bash
-git clone https://github.com/ab21b/shoppers-mlops.git
-cd shoppers-mlops
+git clone https://github.com/ab21b/shoppers-mlops.git && cd shoppers-mlops
+
+uv run pytest                                  # 1. тесты
+docker compose up -d --build                   # 2. compose: сервис + Postgres
+uv run python scripts/kind_up.py               # 3. kind: две реплики, пробы, ответ модели через port-forward
 ```
 
-Установка Python 3.11 и зависимости из lock-файла:
+Что должно получиться:
 
-```bash
-uv python install 3.11
-uv sync --locked
+1. **Тесты:** все зеленые, интеграционные тесты с базой пропущены (`skipped`), потому что `DATABASE_URL` не задан.
+2. **compose:** `docker compose ps` показывает `healthy` у `api` и `db`. После этого сервис слушает `localhost:8000` (`/docs`, `/health`, `/ready`, `/v1/predict`).
+3. **kind:** скрипт собирает образ, создает кластер `mlpro`, загружает образ, создает секрет и базу, применяет `k8s/`, ждет rollout и печатает ответ модели, полученный через port-forward. `kubectl get pods` показывает две реплики `shoppers-service-...` в статусе `Running`.
+
+В конце: `docker compose down -v` и `uv run python scripts/kind_up.py --delete`.
+
+## Платформа, реестр моделей и деплой в свой кластер (дз 3)
+
+Проверка из раздела выше (три команды) этого не требует: там модель берется из файла в образе. Ниже платформа,
+в которой сервис получает модель из реестра MLflow по алиасу `champion`.
+
+```powershell
+uv run python platform/up.py                   # kind (порт 80), Traefik, MLflow, metrics-server; кластер mlops
 ```
 
-Запустите анализ и тесты:
+Интерфейсы: <http://mlflow.localhost> (MLflow), <http://shoppers.localhost/docs> (сервис).
+Если ОС не резолвит `*.localhost`, MLflow доступен и так: `kubectl --context kind-mlops -n mlops port-forward svc/mlflow 5000:5000` и `MLFLOW_TRACKING_URI=http://127.0.0.1:5000`.
 
-```bash
-uv run ruff check src tests
-uv run pytest -q
+Обучение и регистрация (каждый запуск создает версию в реестре; гейт решает, станет ли она `champion`):
+
+```powershell
+$env:MLFLOW_TRACKING_URI = "http://mlflow.localhost"
+uv run dvc pull                                # данные из хранилища DVC (data/online_shoppers_intention.csv)
+$env:MAX_DEPTH = "4";  uv run python -m shoppers.train   # первая версия -> champion
+$env:MAX_DEPTH = "2";  uv run python -m shoppers.train   # хуже -> только challenger
+$env:MAX_DEPTH = "11"; uv run python -m shoppers.train   # лучше на MIN_GAIN -> champion
 ```
 
-Интеграционные тесты, которым нужна PostgreSQL, пропускаются, если `DATABASE_URL` не задан. Для их выполнения надо указать `DATABASE_URL` работающей тестовой базы данных, например:
+Метрика гейта: PR-AUC, запас `GATE_MIN_GAIN=0.005` (см. REPORT.md). Каждый прогон логирует `data_md5`: md5 файла данных, он совпадает с md5 в `data/online_shoppers_intention.csv.dvc`.
 
-```bash
-# Linux/macOS
-export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/shoppers'
+Деплой в этот кластер делает GitHub Actions: job `deploy` идет на self-hosted runner (метка `kind`), запущенном в Docker в сети kind. Порядок и команды: REPORT.md, раздел «Как воспроизвести».
 
-# PowerShell
-$env:DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/shoppers'
+Откат модели без пересборки образа: в MLflow UI перевесить `champion` на прошлую версию, затем
+
+```powershell
+kubectl --context kind-mlops rollout restart deploy/shoppers-service
+kubectl --context kind-mlops rollout status deploy/shoppers-service
+curl.exe -H "Host: shoppers.localhost" http://127.0.0.1/health
 ```
 
-```bash
-uv run pytest -q
+Нагрузка и автомасштабирование (HPA, `k8s/hpa.yaml`):
+
+```powershell
+uv run --with locust locust -f locustfile.py --headless -u 60 -r 20 -t 4m --host http://127.0.0.1
+kubectl --context kind-mlops get hpa -w
 ```
 
-## 4. Проверка через Docker Compose
+## Приложения
 
-Docker Desktop должен быть запущен запущен.
-
-```bash
-docker compose up --build -d
-```
-
-Проверка состояния контейнеров:
-
-```bash
-docker compose ps
-```
-
-Проверка liveness и readiness API:
-
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/ready
-```
-
-Корректный пример запроса:
-
-```bash
-curl -X POST http://localhost:8000/v1/predict \
-  -H 'Content-Type: application/json' \
-  --data @good.json
-```
-
-Некорректный пример запроса (ожидается HTTP 422):
-
-```bash
-curl -i -X POST http://localhost:8000/v1/predict \
-  -H 'Content-Type: application/json' \
-  --data @bad.json
-```
-
-Проверка, что успешные запросы и ошибки валидации записаны в PostgreSQL:
-
-```bash
-docker compose exec db psql -U postgres -d shoppers -c \
-  "SELECT request_id, score, purchase, status_code FROM predictions ORDER BY ts DESC LIMIT 10;"
-```
-
-Снос контейнеров:
-
-```bash
-docker compose down
-```
-
-## 5. Проверка через Kubernetes (kind)
-
-```bash
-uv run python scripts/kind_up.py --keep
-```
-
-Скрипт собирает Docker-образ `shoppers-service:1.0`, создает кластер kind с именем `mlpro`, загружает образ в кластер, создает локальный Secret, развертывает PostgreSQL, ConfigMap, API и Service,затем при готовности API открывает port-forward.
-
-Пока скрипт работает, API доступен по адресу http://localhost:8080. Проверка:
-
-```bash
-curl http://localhost:8080/health
-curl http://localhost:8080/ready
-curl -X POST http://localhost:8080/v1/predict \
-  -H 'Content-Type: application/json' \
-  --data @good.json
-```
-
-Swagger UI: http://localhost:8080/docs.
-
-В другом окне терминала можно проверить состояние ресурсов:
-
-```bash
-kubectl --context kind-mlpro get pods -o wide
-kubectl --context kind-mlpro get deployments
-kubectl --context kind-mlpro get services
-```
-
-Для просмотра ресурсов через k9s:
-
-```bash
-k9s --context kind-mlpro
-```
-
-Чтобы удалить кластер kind:
-
-```bash
-uv run python scripts/kind_up.py --delete
-```
-
-## 6. API
-
-- `GET /health` — проверка работоспособности процесса, версии модели и порога классификации.
-- `GET /ready` — проверка, что модель загружена и сервис готов принимать запросы.
-- `POST /v1/predict` — получение вероятности покупки (`score`) и класса (`purchase`). В ответе также возвращаются `model_version`, `request_id` и `latency_ms`.
-
-Запросы с успешным предсказанием записываются в PostgreSQL со статусом 200. Ошибки валидации записываются со статусом 422. При исключении во время инференса сервис возвращает 500 и сохраняет запись с тем же `request_id`, `score = NULL` и `purchase = NULL`.
-
-## Результаты
-
-**pytest зелёный**
+**pytest зеленый**
 
 ![pytest](docs/screens/01_pytest.png)
 

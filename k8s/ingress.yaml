@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shoppers-service
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: shoppers.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: shoppers-service, port: {number: 80}}

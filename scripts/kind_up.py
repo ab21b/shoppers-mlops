@@ -46,13 +46,13 @@ def wait_ready(url: str, timeout: float = 60) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--keep", action="store_true", help="оставить port-forward открытым до Ctrl+C")
+    ap.add_argument("--keep", action="store_true", help="оставить port-forward открытым до Ctrl C")
     ap.add_argument("--delete", action="store_true", help="удалить кластер и выйти")
     args = ap.parse_args()
 
     for tool in ("docker", "kind", "kubectl"):
         if shutil.which(tool) is None:
-            sys.exit(f"не найден `{tool}` в PATH. Установите его (см. README.md, раздел «Установка с нуля»)")
+            sys.exit(f"не найден `{tool}` в PATH. Установите его")
 
     if args.delete:
         run("kind", "delete", "cluster", "--name", CLUSTER)
@@ -63,7 +63,7 @@ def main() -> None:
     existed = CLUSTER in run("kind", "get", "clusters", capture=True).split()
     if not existed:
         run("kind", "create", "cluster", "--name", CLUSTER)
-    run("kind", "load", "docker-image", IMAGE, "--name", CLUSTER)  # без этого будет ImagePullBackOff
+    run("kind", "load", "docker-image", IMAGE, "--name", CLUSTER)  
 
     local_password = "local-shoppers-password"
     secret = (
@@ -81,6 +81,7 @@ def main() -> None:
     kubectl("apply", "-f", "k8s/postgres.yaml")
     kubectl("rollout", "status", "deployment/postgres", "--timeout=120s")
     kubectl("apply", "-f", "k8s/configmap.yaml")
+    kubectl("patch", "configmap", "shoppers-config", "--type", "merge", "-p", '{"data":{"MODEL_NAME":""}}')
     deployment_yaml = (ROOT / "k8s" / "deployment.yaml").read_text().replace("__IMAGE__", IMAGE)
     deployment_apply = subprocess.run(
         ("kubectl", "--context", CONTEXT, "apply", "-f", "-"),
@@ -99,7 +100,7 @@ def main() -> None:
 
     print(f"\n$ kubectl port-forward svc/shoppers-service {LOCAL_PORT}:80", flush=True)
     pf = subprocess.Popen(["kubectl", "--context", CONTEXT, "port-forward", "svc/shoppers-service", f"{LOCAL_PORT}:80"],
-                          cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # fmt: skip
+                          cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  
     try:
         base = f"http://127.0.0.1:{LOCAL_PORT}"
         wait_ready(f"{base}/ready")
@@ -109,7 +110,7 @@ def main() -> None:
             print(f"\nPOST {base}/v1/predict -> HTTP {r.status}")
             print(json.dumps(json.loads(r.read()), indent=2, ensure_ascii=False))
         if args.keep:
-            print(f"\nport-forward открыт: {base}/docs   (Ctrl+C - остановить). Сейчас самое время для скрина k9s.")
+            print(f"\nport-forward открыт: {base}/docs   (Ctrl C - остановить)")
             pf.wait()
     except KeyboardInterrupt:
         pass
