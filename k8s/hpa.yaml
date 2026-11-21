@@ -10,4 +10,9 @@ spec:
     - type: Resource
       resource:
         name: cpu
-        target: {type: Utilization, averageUtilization: 60}   # проценты от requests.cpu пода
+        target: {type: Utilization, averageUtilization: 60}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - {type: Pods, value: 1, periodSeconds: 30}
