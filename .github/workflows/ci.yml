@@ -102,7 +102,7 @@ jobs:
       contents: read
       packages: read
     env:
-      KIND_CLUSTER: mlops   
+      KIND_CLUSTER: nmlops   
       IMAGE: ${{ needs.build.outputs.image }}
       POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
     steps:
