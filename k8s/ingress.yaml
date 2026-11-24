@@ -5,7 +5,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: shoppers.localhost
+    - host: nshoppers.localhost
       http:
         paths:
           - path: /
